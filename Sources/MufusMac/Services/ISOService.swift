@@ -241,7 +241,7 @@ class ISOService {
         let isoContents = try getAllFiles(in: isoMountPoint)
         let totalFiles = isoContents.count
         let totalSize: UInt64 = isoContents.reduce(0) { sum, file in
-            let fileSize = (try? fileManager.attributesOfItem(atPath: file)).flatMap { $0[.size] as? UInt64 } ?? 0
+            let fileSize = (try? fileManager.attributesOfItem(atPath: file))?[.size] as? UInt64 ?? 0
             return sum + fileSize
         }
         
@@ -316,6 +316,7 @@ class ISOService {
     func finalize(device: USBDevice, destinationPath: String, options: FlashOptions, log: @escaping (String) -> Void, progress: @escaping (Double, String) -> Void) throws {
         guard !isCancelled else { throw FlashError.cancelled }
         
+        // 1. GESTIONE WINDOWS TO GO (Se richiesto)
         if options.createWindowsToGoScript && !destinationPath.isEmpty {
             log("⏳ Generating Windows To Go Bypass Script (install_wtg.bat)...")
             let scriptContent = """
@@ -374,12 +375,40 @@ class ISOService {
             echo Estrazione Windows (%wimPath%) su W:\\... (Richiede tempo!)
             dism /Apply-Image /ImageFile:"%wimPath%" /Index:1 /ApplyDir:W:\\
             
+            echo.
+            echo Patching Registro di Sistema (Bypass Hardware in fase di Boot)...
+            :: Carica l'alveare SYSTEM del nuovo Windows per modificarlo offline
+            reg load HKLM\\OFFLINE_SYSTEM W:\\Windows\\System32\\config\\SYSTEM
+            
+            :: Crea la chiave LabConfig se non esiste e aggiunge i bypass
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /v BypassRAMCheck /t REG_DWORD /d 1 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /v BypassStorageCheck /t REG_DWORD /d 1 /f
+            
+            :: Aggiunge bypass per MoSetup
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\MoSetup /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\MoSetup /v AllowUpgradesWithUnsupportedTPMOrCPU /t REG_DWORD /d 1 /f
+            
+            :: Aggiunge bypass per Windows To Go (Evita blocco hardware USB)
+            reg add HKLM\\OFFLINE_SYSTEM\\ControlSet001\\Control /v PortableOperatingSystem /t REG_DWORD /d 1 /f
+            
+            :: Smonta l'alveare
+            reg unload HKLM\\OFFLINE_SYSTEM
+            
             if not exist "%installerDrive%\\$WinPEDriver$" goto :skipDrivers
             echo.
             echo Iniezione driver Boot Camp (Tastiera/Mouse/ecc) in W:\\...
             dism /Image:W:\\ /Add-Driver /Driver:"%installerDrive%\\$WinPEDriver$" /Recurse
             
             :skipDrivers
+            
+            echo.
+            echo Copia file di configurazione automatica...
+            if not exist "W:\\Windows\\Panther" mkdir "W:\\Windows\\Panther"
+            copy /y "%installerDrive%\\AutoUnattend.xml" "W:\\Windows\\Panther\\unattend.xml"
             
             echo.
             echo Creazione Bootloader su EFI...
@@ -416,6 +445,69 @@ class ISOService {
             }
         }
         
+        // 2. GESTIONE BYPASS HARDWARE (Fuori dall'if WTG, così si applica alle chiavette standard!)
+        if !destinationPath.isEmpty {
+            log("⏳ Generazione AutoUnattend.xml per bypass controlli hardware...")
+            let unattendContent = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <unattend xmlns="urn:schemas-microsoft-com:unattend">
+                <settings pass="windowsPE">
+                    <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WCM/2002/Xml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                        <UserData>
+                            <AcceptEula>true</AcceptEula>
+                        </UserData>
+                        <RunSynchronous>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>1</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassTPMCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>2</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassSecureBootCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>3</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassRAMCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>4</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassCPUCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>5</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassStorageCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                        </RunSynchronous>
+                    </component>
+                </settings>
+                <settings pass="specialize">
+                    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WCM/2002/Xml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                        <RunSynchronous>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>1</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassTPMCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                            <RunSynchronousCommand wcm:action="add">
+                                <Order>2</Order>
+                                <Path>cmd /c reg add "HKLM\\SYSTEM\\Setup\\LabConfig" /v "BypassSecureBootCheck" /t REG_DWORD /d 1 /f</Path>
+                            </RunSynchronousCommand>
+                        </RunSynchronous>
+                    </component>
+                </settings>
+            </unattend>
+            """
+            
+            let unattendPath = (destinationPath as NSString).appendingPathComponent("AutoUnattend.xml")
+            let crlfUnattendContent = unattendContent.replacingOccurrences(of: "\n", with: "\r\n")
+            do {
+                try crlfUnattendContent.write(toFile: unattendPath, atomically: true, encoding: .utf8)
+                log("✅ AutoUnattend.xml creato (Bypass Hardware attivato).")
+            } catch {
+                log("⚠️  Impossibile scrivere AutoUnattend.xml: \(error.localizedDescription)")
+            }
+        }
+        
+        // 3. PULIZIA E SMONTAGGIO
         progress(0.96, "Syncing data to drive...")
         log("⏳ Syncing data to USB drive...")
         let _ = diskService.runCommand("/bin/sync", arguments: [])
@@ -442,9 +534,7 @@ class ISOService {
     
     private func mountISO(at url: URL, log: @escaping (String) -> Void) throws -> String {
         // Direct mount — single hdiutil call
-        let mountOutput = diskService.runCommand("/usr/bin/hdiutil", arguments: [
-            "attach", url.path, "-readonly", "-noverify", "-noautofsck"
-        ])
+        let mountOutput = diskService.runCommand("/usr/bin/hdiutil", arguments: ["attach", url.path, "-readonly", "-noverify", "-noautofsck"])
         log(mountOutput)
         
         // Parse mount point from output
