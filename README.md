@@ -1,6 +1,8 @@
 # MufusMac
 
-A native macOS utility for creating bootable USB flash drives from ISO image files. Inspired by [Rufus](https://rufus.ie/) for Windows, but designed natively for the Mac ecosystem.
+A native macOS utility for creating bootable USB flash drives from ISO image files.<br>Inspired by [Rufus](https://rufus.ie/) for Windows, but designed natively for the Mac ecosystem.<br>
+
+<img width="430" height="372" alt="Screenshot 2026-02-20 alle 23 28 43" src="https://github.com/user-attachments/assets/6bf9a5cd-abe3-4274-967c-9068cf36510a" /><br>
 
 ## ✨ Advanced New Features
 
