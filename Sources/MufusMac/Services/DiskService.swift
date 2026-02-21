@@ -43,7 +43,7 @@ class DiskService {
                 name = info["MediaName"] as? String ?? info["VolumeName"] as? String ?? ""
                 mountPoint = info["MountPoint"] as? String
                 
-                // Skip non-removable disks
+                // Skip non-removable disks (unless user is running from an external drive themselves)
                 let removable = info["RemovableMediaOrExternalDevice"] as? Bool ?? false
                 let isInternal = info["Internal"] as? Bool ?? true
                 if !removable && isInternal { continue }
@@ -119,18 +119,7 @@ class DiskService {
     
     /// Checks if ntfs-3g is available on the system
     func isNTFS3GInstalled() -> Bool {
-        let result = runCommand("/usr/bin/which", arguments: ["mkntfs"])
-        if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !result.contains("not found") {
-            return true
-        }
-        // Check common Homebrew paths
-        let brewPaths = [
-            "/usr/local/bin/mkntfs",
-            "/opt/homebrew/bin/mkntfs",
-            "/usr/local/sbin/mkntfs",
-            "/opt/homebrew/sbin/mkntfs"
-        ]
-        return brewPaths.contains { FileManager.default.fileExists(atPath: $0) }
+        return mkntfsPath() != nil
     }
     
     /// Returns the path to mkntfs binary
@@ -141,7 +130,7 @@ class DiskService {
             "/usr/local/sbin/mkntfs",
             "/opt/homebrew/sbin/mkntfs"
         ]
-        return paths.first { FileManager.default.fileExists(atPath: $0) }
+        return paths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
     
     /// Formats the drive as NTFS using ntfs-3g's mkntfs
@@ -190,7 +179,8 @@ class DiskService {
         )
         
         if ntfsResult.contains("Error") || ntfsResult.contains("error") {
-            // Some mkntfs versions output to stderr but succeed
+            // Alcune versioni di mkntfs scrivono l'output di successo su stderr. 
+            // Mostriamo il log solo se l'utente dovesse riscontrare problemi reali.
             log("⚠️  mkntfs output: \(ntfsResult)")
         }
         
@@ -257,9 +247,9 @@ class DiskService {
                 let volumeName = (info["VolumeName"] as? String ?? "").lowercased()
                 if volumeName != "efi" && !mount.lowercased().contains("/efi") {
                     
-                    // In Dual-Partition mode, ensure we are targeting the Installer partition, not the WindowsData one
+                    // In Dual-Partition mode, ensure we are targeting the Installer partition
                     if let opts = options, opts.createWindowsDataPartition {
-                        if volumeName == "windowsdata" {
+                        if volumeName == "windowsdata" || volumeName == "bootcamp" {
                             continue // Skip the data partition, we want the installer one
                         }
                     }
@@ -281,8 +271,9 @@ class DiskService {
         return nil
     }
     
-    // MARK: - Private Helpers
+    // MARK: - Process Execution Helpers
     
+    /// Esegue un comando shell in modo sincrono ma previene i deadlock del buffer di macOS
     func runCommand(_ command: String, arguments: [String]) -> String {
         let process = Process()
         let pipe = Pipe()
@@ -292,24 +283,48 @@ class DiskService {
         process.standardOutput = pipe
         process.standardError = pipe
         
+        var outputData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        
+        // Lettura asincrona per evitare che la pipe si riempia (buffer a 64KB) causando un deadlock
+        pipe.fileHandleForReading.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            if data.isEmpty {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                group.leave()
+            } else {
+                outputData.append(data)
+            }
+        }
+        
         do {
             try process.run()
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
+            group.wait()
+            return String(data: outputData, encoding: .utf8) ?? ""
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            group.leave()
             return "Error: \(error.localizedDescription)"
         }
     }
     
+    /// Esegue un comando shell con privilegi di amministratore (tramite osascript)
     func runCommandPrivileged(_ command: String, arguments: [String]) -> String {
-        // Se siamo già root (es. app riavviata con privilegi), esegui normalmente ereditando i permessi
+        // Se siamo già root (es. app riavviata con privilegi), esegui normalmente
         if getuid() == 0 {
             return runCommand(command, arguments: arguments)
         }
         
-        // Use osascript for admin privileges
-        let script = "do shell script \"\(command) \(arguments.joined(separator: " "))\" with administrator privileges"
+        // Escape quotes and backslashes per AppleScript string rules
+        let commandWithArgs = ([command] + arguments).map { arg in
+            let escaped = arg.replacingOccurrences(of: "\\", with: "\\\\")
+                             .replacingOccurrences(of: "\"", with: "\\\"")
+            return "\\\"\(escaped)\\\""
+        }.joined(separator: " ")
+        
+        let script = "do shell script \"\(commandWithArgs)\" with administrator privileges"
         
         let process = Process()
         let pipe = Pipe()
@@ -319,12 +334,28 @@ class DiskService {
         process.standardOutput = pipe
         process.standardError = pipe
         
+        var outputData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        
+        pipe.fileHandleForReading.readabilityHandler = { fileHandle in
+            let data = fileHandle.availableData
+            if data.isEmpty {
+                pipe.fileHandleForReading.readabilityHandler = nil
+                group.leave()
+            } else {
+                outputData.append(data)
+            }
+        }
+        
         do {
             try process.run()
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
+            group.wait()
+            return String(data: outputData, encoding: .utf8) ?? ""
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            group.leave()
             return "Error: \(error.localizedDescription)"
         }
     }
