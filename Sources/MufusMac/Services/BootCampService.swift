@@ -266,30 +266,35 @@ class BootCampService: ObservableObject {
         let fileManager = FileManager.default
         let winpeDestPath = (usbRootPath as NSString).appendingPathComponent("$WinPEDriver$")
         
-        // 1. If the Boot Camp package already has a $WinPEDriver$ folder, just use it
-        let nativeWinPeSource = (sourcePath as NSString).appendingPathComponent("$WinPEDriver$")
-        if fileManager.fileExists(atPath: nativeWinPeSource) {
-            if fileManager.fileExists(atPath: winpeDestPath) { try? fileManager.removeItem(atPath: winpeDestPath) }
-            try? fileManager.copyItem(atPath: nativeWinPeSource, toPath: winpeDestPath)
-            log("✅ Utilizzata cartella $WinPEDriver$ nativa di Apple")
-        } else {
-            // 2. Otherwise, manually create it and cherry-pick input drivers (Keyboard, Mouse, Trackpad, SPI)
-            if fileManager.fileExists(atPath: winpeDestPath) { try? fileManager.removeItem(atPath: winpeDestPath) }
-            try fileManager.createDirectory(atPath: winpeDestPath, withIntermediateDirectories: true)
-            
-            let driverFoldersToFind = [
-                "AppleKeyboard", "AppleMultiTouchTrackPad", "AppleMightyMouse",
-                "AppleWirelessMouse", "AppleWirelessTrackpad", "AppleSPIKeyboard",
-                "AppleSPITrackpad", "AppleBluetoothBroadcom", "AppleUSBVHCI"
-            ]
-            
-            var foundCount = 0
-            if let enumerator = fileManager.enumerator(atPath: sourcePath) {
+        // Ensure destination is clean
+        if fileManager.fileExists(atPath: winpeDestPath) { try? fileManager.removeItem(atPath: winpeDestPath) }
+        try fileManager.createDirectory(atPath: winpeDestPath, withIntermediateDirectories: true)
+        
+        // CRITICAL: "Windows could not configure hardware" is often caused by injecting 
+        // full Boot Camp drivers (especially Mass Storage/SSD) into the offline image.
+        // We MUST cherry-pick only the drivers needed to finish the initial setup (Input).
+        let driverFoldersToFind = [
+            "AppleKeyboard", "AppleMultiTouchTrackPad", "AppleMightyMouse",
+            "AppleWirelessMouse", "AppleWirelessTrackpad", "AppleSPIKeyboard",
+            "AppleSPITrackpad", "AppleBluetoothBroadcom", "AppleUSBVHCI",
+            "AppleUserHID"
+        ]
+        
+        var foundCount = 0
+        
+        // We look both in the root and in the native $WinPEDriver$ if it exists
+        let searchFolders = ["", "$WinPEDriver$"]
+        
+        for subFolder in searchFolders {
+            let currentSearchPath = (sourcePath as NSString).appendingPathComponent(subFolder)
+            if let enumerator = fileManager.enumerator(atPath: currentSearchPath) {
                 while let file = enumerator.nextObject() as? String {
                     let folderName = (file as NSString).lastPathComponent
-                    if driverFoldersToFind.contains(folderName) {
-                        let fullSourceDriver = (sourcePath as NSString).appendingPathComponent(file)
+                    if driverFoldersToFind.contains(where: { folderName.contains($0) }) {
+                        let fullSourceDriver = (currentSearchPath as NSString).appendingPathComponent(file)
                         let fullDestDriver = (winpeDestPath as NSString).appendingPathComponent(folderName)
+                        
+                        // Copy folder/file if it doesn't already exist in destination
                         if !fileManager.fileExists(atPath: fullDestDriver) {
                             try? fileManager.copyItem(atPath: fullSourceDriver, toPath: fullDestDriver)
                             foundCount += 1
@@ -297,7 +302,8 @@ class BootCampService: ObservableObject {
                     }
                 }
             }
-            log("✅ Estratti \(foundCount) driver di input critici in $WinPEDriver$")
         }
+        
+        log("✅ Estratti \(foundCount) driver di input critici in $WinPEDriver$ (per evitare errori OOBE)")
     }
 }

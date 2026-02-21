@@ -112,12 +112,7 @@ class ISOService {
     // MARK: - Format & Mount
     
     private func performFormat(device: USBDevice, options: FlashOptions, log: @escaping (String) -> Void) throws {
-        // For NTFS: format as ExFAT first, then format with ntfs-3g
-        // But then we need to MOUNT the NTFS partition for writing
-        // macOS cannot write to NTFS natively — we need ntfs-3g mount or fallback to ExFAT
-        
         if options.fileSystem == .ntfs {
-            // Check if ntfs-3g mount tools are available (not just mkntfs)
             let ntfs3gMountAvailable = findNTFS3GMount() != nil
             
             if !ntfs3gMountAvailable {
@@ -134,24 +129,19 @@ class ISOService {
         try diskService.formatDrive(device: device, options: options, log: log)
     }
     
-    /// Waits for the formatted drive to mount and returns the mount point
     private func waitForMount(device: USBDevice, options: FlashOptions, log: @escaping (String) -> Void) throws -> String {
         log("⏳ Waiting for formatted drive to appear...")
         Thread.sleep(forTimeInterval: 3.0)
         
-        // For NTFS: need to mount with ntfs-3g instead of native macOS mount
-        // BUT only in Single-Partition mode! In Dual-Partition mode, the installer partition is ALWAYS ExFAT, so we use native mount.
         if options.fileSystem == .ntfs && !options.createWindowsDataPartition, let ntfs3gMount = findNTFS3GMount() {
             return try mountNTFSForWriting(device: device, ntfs3gMount: ntfs3gMount, log: log)
         }
         
-        // Standard mount for FAT32/ExFAT/APFS
         if let mountPt = diskService.getMountPoint(for: device, options: options) {
             log("✅ USB drive mounted at: \(mountPt)")
             return mountPt
         }
         
-        // Try to mount manually — use mountDisk to mount all mountable partitions (fixes GUID s2 issue)
         let mountResult = diskService.runCommand("/usr/sbin/diskutil", arguments: ["mountDisk", device.id])
         log(mountResult)
         Thread.sleep(forTimeInterval: 2.0)
@@ -163,11 +153,9 @@ class ISOService {
         return retryMount
     }
     
-    /// Mounts an NTFS partition for read-write using ntfs-3g
     private func mountNTFSForWriting(device: USBDevice, ntfs3gMount: String, log: @escaping (String) -> Void) throws -> String {
         var partition = "\(device.bsdName)s1"
         
-        // Dynamically find the partition (s1 for MBR, s2 for GPT)
         let listOutput = diskService.runCommand("/usr/sbin/diskutil", arguments: ["list", "-plist", device.id])
         if let listData = listOutput.data(using: .utf8),
            let listPlist = try? PropertyListSerialization.propertyList(from: listData, format: nil) as? [String: Any],
@@ -181,7 +169,6 @@ class ISOService {
         
         log("⏳ Preparing NTFS mount...")
         
-        // 1. Force unmount any existing native mount (macOS usually auto-mounts as read-only)
         let unmountResult = diskService.runCommand("/usr/sbin/diskutil", arguments: ["unmount", partition])
         if !unmountResult.contains("Unmount failed") {
             log("✅ System auto-mount removed")
@@ -203,10 +190,8 @@ class ISOService {
             throw FlashError.mountFailed("Failed to create temporary mount script.")
         }
         
-        // Run the script file instead of passing it as a string argument to avoid quote escaping hell in osascript
         let result = diskService.runCommandPrivileged(tempScriptPath, arguments: [])
         
-        // Check if mount succeeded
         let fm = FileManager.default
         Thread.sleep(forTimeInterval: 1.0)
         
@@ -258,7 +243,6 @@ class ISOService {
             let destPath = destinationPath + relativePath
             let destDir = (destPath as NSString).deletingLastPathComponent
             
-            // Create directory structure
             if !fileManager.fileExists(atPath: destDir) {
                 try fileManager.createDirectory(atPath: destDir, withIntermediateDirectories: true)
             }
@@ -271,7 +255,6 @@ class ISOService {
                     try fileManager.createDirectory(atPath: destPath, withIntermediateDirectories: true)
                 }
             } else {
-                // Check file size for FAT32 limit
                 let fileSize = (try? fileManager.attributesOfItem(atPath: filePath))?[.size] as? UInt64 ?? 0
                 
                 if options.fileSystem == .fat32 && fileSize >= (4 * 1024 * 1024 * 1024 - 1) {
@@ -281,7 +264,6 @@ class ISOService {
                     continue
                 }
                 
-                // Copy file
                 if fileManager.fileExists(atPath: destPath) {
                     try fileManager.removeItem(atPath: destPath)
                 }
@@ -376,9 +358,18 @@ class ISOService {
             dism /Apply-Image /ImageFile:"%wimPath%" /Index:1 /ApplyDir:W:\\
             
             echo.
-            echo Patching Registro di Sistema (Bypass Hardware in fase di Boot)...
+            echo Patching Registro di Sistema (Ottimizzazione Hardware USB)...
             :: Carica l'alveare SYSTEM del nuovo Windows per modificarlo offline
             reg load HKLM\\OFFLINE_SYSTEM W:\\Windows\\System32\\config\\SYSTEM
+            
+            :: Aggiunge bypass per Windows To Go (Evita blocco hardware USB in fase di boot)
+            reg add HKLM\\OFFLINE_SYSTEM\\ControlSet001\\Control /v PortableOperatingSystem /t REG_DWORD /d 1 /f
+            
+            :: Aggiunge Timeout PnP: dice a Windows di attendere il caricamento dei driver USB prima di dare errore
+            reg add HKLM\\OFFLINE_SYSTEM\\ControlSet001\\Control\\PnP /v PollBootPartitionTimeout /t REG_DWORD /d 30000 /f
+            
+            :: Bypass setup phase errors (Force completion)
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\ChildCompletion /v setup.exe /t REG_DWORD /d 3 /f
             
             :: Crea la chiave LabConfig se non esiste e aggiunge i bypass
             reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /f
@@ -392,15 +383,14 @@ class ISOService {
             reg add HKLM\\OFFLINE_SYSTEM\\Setup\\MoSetup /f
             reg add HKLM\\OFFLINE_SYSTEM\\Setup\\MoSetup /v AllowUpgradesWithUnsupportedTPMOrCPU /t REG_DWORD /d 1 /f
             
-            :: Aggiunge bypass per Windows To Go (Evita blocco hardware USB)
-            reg add HKLM\\OFFLINE_SYSTEM\\ControlSet001\\Control /v PortableOperatingSystem /t REG_DWORD /d 1 /f
-            
             :: Smonta l'alveare
             reg unload HKLM\\OFFLINE_SYSTEM
             
             if not exist "%installerDrive%\\$WinPEDriver$" goto :skipDrivers
             echo.
-            echo Iniezione driver Boot Camp (Tastiera/Mouse/ecc) in W:\\...
+            echo Iniezione driver Boot Camp in W:\\...
+            :: L'iniezione dei driver Apple (specialmente AppleSSD.sys) puo' causare l'errore "Windows could not configure hardware".
+            :: Se Tiny10 fallisce, prova a installare SENZA driver e aggiungili dopo.
             dism /Image:W:\\ /Add-Driver /Driver:"%installerDrive%\\$WinPEDriver$" /Recurse
             
             :skipDrivers
@@ -416,7 +406,6 @@ class ISOService {
             
             echo.
             echo Impostazione Windows To Go come avvio predefinito...
-            :: Forza il menu di avvio a non mostrare scelte e avviare subito il nuovo OS
             W:\\Windows\\System32\\bcdedit /store %installerDrive%\\efi\\microsoft\\boot\\bcd /set {default} device partition=W:
             W:\\Windows\\System32\\bcdedit /store %installerDrive%\\efi\\microsoft\\boot\\bcd /set {default} osdevice partition=W:
             W:\\Windows\\System32\\bcdedit /store %installerDrive%\\efi\\microsoft\\boot\\bcd /set {bootmgr} default {default}
@@ -431,11 +420,7 @@ class ISOService {
             pause
             """
             
-            // CRITICAL: Windows batch files, especially those with FOR loops and labels, 
-            // will fail to execute properly in WinPE if they only have macOS/Unix (\n) line endings.
-            // We MUST force CRLF (\r\n) before writing.
             let crlfScriptContent = scriptContent.replacingOccurrences(of: "\n", with: "\r\n")
-            
             let scriptPath = (destinationPath as NSString).appendingPathComponent("install_wtg.bat")
             do {
                 try crlfScriptContent.write(toFile: scriptPath, atomically: true, encoding: .windowsCP1252)
@@ -445,7 +430,7 @@ class ISOService {
             }
         }
         
-        // 2. GESTIONE BYPASS HARDWARE (Fuori dall'if WTG, così si applica alle chiavette standard!)
+        // 2. GESTIONE BYPASS HARDWARE (AutoUnattend.xml per Installazioni Standard)
         if !destinationPath.isEmpty {
             log("⏳ Generazione AutoUnattend.xml per bypass controlli hardware...")
             let unattendContent = """
@@ -512,11 +497,9 @@ class ISOService {
         log("⏳ Syncing data to USB drive...")
         let _ = diskService.runCommand("/bin/sync", arguments: [])
         
-        // Clean up the mount points to avoid user confusion (unmount the whole disk, then mount only the installer)
         log("⏳ Cleaning up volumes...")
         let _ = diskService.runCommand("/usr/sbin/diskutil", arguments: ["unmountDisk", device.id])
         
-        // Remount just the installer partition so the user can see it
         let listOutput = diskService.runCommand("/usr/sbin/diskutil", arguments: ["list", "-plist", device.id])
         if let listData = listOutput.data(using: .utf8),
            let listPlist = try? PropertyListSerialization.propertyList(from: listData, format: nil) as? [String: Any],
@@ -533,20 +516,16 @@ class ISOService {
     // MARK: - ISO Mount Helpers
     
     private func mountISO(at url: URL, log: @escaping (String) -> Void) throws -> String {
-        // Direct mount — single hdiutil call
         let mountOutput = diskService.runCommand("/usr/bin/hdiutil", arguments: ["attach", url.path, "-readonly", "-noverify", "-noautofsck"])
         log(mountOutput)
         
-        // Parse mount point from output
         let lines = mountOutput.components(separatedBy: "\n")
         for line in lines.reversed() {
             if line.contains("/Volumes/") {
-                // hdiutil output is tab-separated: device \t type \t mount_point
                 let parts = line.components(separatedBy: "\t")
                 if let mountPath = parts.last?.trimmingCharacters(in: .whitespacesAndNewlines), !mountPath.isEmpty {
                     return mountPath
                 }
-                // Try space-separated fallback
                 if let range = line.range(of: "/Volumes/") {
                     let mountPath = String(line[range.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !mountPath.isEmpty {
@@ -578,7 +557,6 @@ class ISOService {
         return files
     }
     
-    /// Finds files larger than the given size in bytes
     private func findLargeFiles(in directory: String, largerThan maxSize: UInt64) -> [String] {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(atPath: directory) else { return [] }
@@ -595,7 +573,6 @@ class ISOService {
         return largeFiles
     }
     
-    /// Finds ntfs-3g mount binary
     private func findNTFS3GMount() -> String? {
         let paths = [
             "/usr/local/bin/ntfs-3g",
