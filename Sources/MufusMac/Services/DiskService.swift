@@ -79,7 +79,7 @@ class DiskService {
             // Format 2 is the Installer partition (always ExFAT so Mac can boot it natively to install Windows)
             let partResult = runCommandPrivileged(
                 "/usr/sbin/diskutil",
-                arguments: ["partitionDisk", device.bsdName, "2", scheme, format, "WindowsData", "R", "ExFAT", label, "16G"]
+                arguments: ["partitionDisk", device.bsdName, "2", scheme, format, "WindowsData", "R", "ExFAT", label, "64G"]
             )
             
             if partResult.contains("Error") || partResult.contains("error") {

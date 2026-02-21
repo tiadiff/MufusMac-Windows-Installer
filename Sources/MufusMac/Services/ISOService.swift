@@ -370,6 +370,15 @@ class ISOService {
             
             :: Bypass setup phase errors (Force completion)
             reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\ChildCompletion /v setup.exe /t REG_DWORD /d 3 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\ChildCompletion /v oobe.exe /t REG_DWORD /d 3 /f
+            
+            :: Force Sysprep states to "Finished"
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\SysprepStatus /v GeneralizationState /t REG_DWORD /d 7 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\SysprepStatus /v CleanupState /t REG_DWORD /d 2 /f
+            
+            :: Force Unattend phases to "Finished"
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\UnattendPasses /v specialize /t REG_DWORD /d 2 /f
+            reg add HKLM\\OFFLINE_SYSTEM\\Setup\\Status\\UnattendPasses /v oobeSystem /t REG_DWORD /d 2 /f
             
             :: Crea la chiave LabConfig se non esiste e aggiunge i bypass
             reg add HKLM\\OFFLINE_SYSTEM\\Setup\\LabConfig /f
