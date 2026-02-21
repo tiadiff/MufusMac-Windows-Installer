@@ -273,6 +273,7 @@ class BootCampService: ObservableObject {
         // CRITICAL: "Windows could not configure hardware" is often caused by injecting 
         // full Boot Camp drivers (especially Mass Storage/SSD) into the offline image.
         // We MUST cherry-pick only the drivers needed to finish the initial setup (Input).
+        // Whitelist concept: only include what is strictly necessary for the Mac UI/Input.
         let driverFoldersToFind = [
             "AppleKeyboard", "AppleMultiTouchTrackPad", "AppleMightyMouse",
             "AppleWirelessMouse", "AppleWirelessTrackpad", "AppleSPIKeyboard",
@@ -280,7 +281,11 @@ class BootCampService: ObservableObject {
             "AppleUserHID"
         ]
         
+        // BLACKLIST: These drivers are known to cause OOBE failures (e.g., AppleSSD.sys on USB drives)
+        let driverBlacklist = ["AppleSSD", "AppleNullDriver"]
+        
         var foundCount = 0
+        var skippedBlacklisted = 0
         
         // We look both in the root and in the native $WinPEDriver$ if it exists
         let searchFolders = ["", "$WinPEDriver$"]
@@ -290,6 +295,13 @@ class BootCampService: ObservableObject {
             if let enumerator = fileManager.enumerator(atPath: currentSearchPath) {
                 while let file = enumerator.nextObject() as? String {
                     let folderName = (file as NSString).lastPathComponent
+                    
+                    // Specific check for AppleSSD matching user feedback
+                    if driverBlacklist.contains(where: { folderName.contains($0) }) {
+                        skippedBlacklisted += 1
+                        continue
+                    }
+
                     if driverFoldersToFind.contains(where: { folderName.contains($0) }) {
                         let fullSourceDriver = (currentSearchPath as NSString).appendingPathComponent(file)
                         let fullDestDriver = (winpeDestPath as NSString).appendingPathComponent(folderName)
@@ -304,6 +316,9 @@ class BootCampService: ObservableObject {
             }
         }
         
-        log("✅ Estratti \(foundCount) driver di input critici in $WinPEDriver$ (per evitare errori OOBE)")
+        if skippedBlacklisted > 0 {
+            log("🚫 Esclusi \(skippedBlacklisted) driver potenzialmente instabili (incluso AppleSSD) per garantire il boot USB")
+        }
+        log("✅ Estratti \(foundCount) driver di input critici in $WinPEDriver$")
     }
 }
